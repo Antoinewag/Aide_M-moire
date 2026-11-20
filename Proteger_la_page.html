@@ -11,7 +11,9 @@
      2. Mise à jour (optionnelle) de la version embarquée dans l'app
      3. CSS minifié, HTML compacté, commentaires supprimés
      4. JavaScript obfusqué (bibliothèque javascript-obfuscator, intégrée)
-     5. Contrôles automatiques puis téléchargement de index.html / version.json
+     5. Option « code d'accès » : la page entière est chiffrée (AES-256) ;
+        index.html n'affiche qu'un écran de saisie du code
+     6. Contrôles automatiques puis téléchargement de index.html / version.json
 
    Ce fichier ne contient AUCUN code de l'application ni aucune donnée :
    il peut être publié sur GitHub sans risque.
@@ -118,6 +120,13 @@ ul.checks li.ko::before{content:"✖";color:var(--danger)}
           <option value="standard" selected>Standard — recommandé (rapide, app fluide)</option>
           <option value="strong">Renforcé — plus illisible, app légèrement plus lente</option>
         </select></div>
+      <div class="field full" style="margin-top:6px"><label class="check"><input type="checkbox" id="g-on" checked> Exiger un code d'accès pour ouvrir index.html</label>
+        <small class="muted">L'app entière est chiffrée (AES-256) avec ce code : sans lui, index.html n'affiche qu'un écran de saisie et le code de l'app est illisible.</small></div>
+      <div class="field gate"><label for="g-code">Code d'accès (8 caractères minimum)</label><input type="password" id="g-code" autocomplete="new-password"></div>
+      <div class="field gate"><label for="g-code2">Confirmation</label><input type="password" id="g-code2" autocomplete="new-password"></div>
+      <div class="field gate"><label for="g-min">Redemander le code après (minutes d'inactivité)</label><input type="text" id="g-min" value="60" inputmode="numeric"><small class="muted">0 = à chaque ouverture ou rechargement de la page.</small></div>
+      <div class="field gate"><label class="check" style="margin-top:24px"><input type="checkbox" id="g-show"> Afficher le code</label></div>
+      <div class="field full gate"><div class="info warn" style="margin:0">Le code n'est enregistré nulle part. En cas d'oubli : regénérez index.html ici avec un nouveau code — vos données dans l'app ne sont pas perdues.</div></div>
     </div>
     <div class="row" style="margin-top:14px">
       <button class="btn primary" id="go"><svg viewBox="0 0 24 24" class="i"><path d="M12 3l8 3v6c0 5-3.5 8.2-8 9-4.5-.8-8-4-8-9V6z"/></svg><span>Protéger la page</span></button>
@@ -301,6 +310,76 @@ function obfuscate(js, level) {
   return JavaScriptObfuscator.obfuscate(js, opts).getObfuscatedCode();
 }
 
+/* ---------- Code d'accès : chiffrement de la page entière ----------
+   index.html devient une petite page d'accès contenant l'app chiffrée
+   (gzip → AES-GCM 256, clé dérivée du code par PBKDF2-SHA256).
+   Le bon code déchiffre l'app en mémoire puis l'affiche (document.write). */
+const GATE_ITER = 310000;
+const b64 = u => { let s = ''; for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]); return btoa(s); };
+const unb64 = s => { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; };
+async function gzip(text) {
+  if (typeof CompressionStream === 'undefined') return null;
+  return new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+}
+async function gunzip(bytes) { return new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text(); }
+async function deriveRaw(code, salt, iter) {
+  const k = await crypto.subtle.importKey('raw', new TextEncoder().encode(code), 'PBKDF2', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: iter, hash: 'SHA-256' }, k, 256));
+}
+async function encryptPage(html, code, minutes) {
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const z = await gzip(html), plain = z || new TextEncoder().encode(html);
+  const key = await crypto.subtle.importKey('raw', await deriveRaw(code, salt, GATE_ITER), 'AES-GCM', false, ['encrypt']);
+  const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain));
+  return { id: b64(crypto.getRandomValues(new Uint8Array(6))).replace(/[^a-z0-9]/gi, ''), n: GATE_ITER, s: b64(salt), v: b64(iv), d: b64(data), z: z ? 1 : 0, m: minutes };
+}
+async function decryptPage(P, code) {
+  const key = await crypto.subtle.importKey('raw', await deriveRaw(code, unb64(P.s), P.n), 'AES-GCM', false, ['decrypt']);
+  const buf = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(P.v) }, key, unb64(P.d)));
+  return P.z ? gunzip(buf) : new TextDecoder().decode(buf);
+}
+/** Page d'accès autonome (aucune dépendance, aucun secret en clair) */
+function gatePage(P, appName, version) {
+  const S = '<' + '/script>';
+  const loader = `(function(){'use strict';
+var P=${JSON.stringify(P)},K='aam.gate.'+P.id,fails=0,$=function(i){return document.getElementById(i)};
+function u8(s){var b=atob(s),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u}
+function s64(u){var s='';for(var i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);return btoa(s)}
+function derive(c){return crypto.subtle.importKey('raw',new TextEncoder().encode(c),'PBKDF2',false,['deriveBits']).then(function(k){return crypto.subtle.deriveBits({name:'PBKDF2',salt:u8(P.s),iterations:P.n,hash:'SHA-256'},k,256)}).then(function(b){return new Uint8Array(b)})}
+function decrypt(raw){return crypto.subtle.importKey('raw',raw,'AES-GCM',false,['decrypt']).then(function(k){return crypto.subtle.decrypt({name:'AES-GCM',iv:u8(P.v)},k,u8(P.d))}).then(function(buf){return P.z?new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'))).text():new TextDecoder().decode(buf)})}
+function forget(){try{sessionStorage.removeItem(K)}catch(e){}}
+function keep(raw){if(P.m>0){try{sessionStorage.setItem(K,JSON.stringify({k:s64(raw),t:Date.now()}))}catch(e){}}}
+function watch(){if(!(P.m>0))return;var last=Date.now(),saved=0;
+function act(){last=Date.now();if(last-saved>30000){saved=last;try{var o=JSON.parse(sessionStorage.getItem(K));if(o){o.t=last;sessionStorage.setItem(K,JSON.stringify(o))}}catch(e){}}}
+['mousemove','keydown','click','touchstart','scroll'].forEach(function(ev){window.addEventListener(ev,act,{passive:true,capture:true})});
+setInterval(function(){if(Date.now()-last>P.m*60000){forget();location.reload()}},15000)}
+function launch(html,raw){keep(raw);document.open();document.write(html);document.close();watch()}
+function show(){$('g').hidden=false;$('c').focus()}
+function submit(e){e.preventDefault();var c=$('c').value,b=$('b'),er=$('e');if(!c)return;b.disabled=true;er.textContent='Vérification…';var raw;
+derive(c).then(function(r){raw=r;return decrypt(r)}).then(function(html){launch(html,raw)}).catch(function(){fails++;er.textContent='Code incorrect.';$('c').value='';setTimeout(function(){b.disabled=false;$('c').focus()},Math.min(30000,500*Math.pow(2,fails-1)))})}
+if(!window.crypto||!crypto.subtle){$('e').textContent='Navigateur non compatible (ouvrez la page en https).';$('g').hidden=false;return}
+$('g').addEventListener('submit',submit);
+var o=null;try{o=JSON.parse(sessionStorage.getItem(K))}catch(e){}
+if(o&&P.m>0&&Date.now()-o.t<P.m*60000){var raw=u8(o.k);decrypt(raw).then(function(h){launch(h,raw)}).catch(function(){forget();show()})}else{forget();show()}
+})();`;
+  return `<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow"><meta name="theme-color" content="#0b2545">
+<title>${esc(appName)}</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b2545'/%3E%3Cpath d='M18 44V20h14a8 8 0 0 1 0 16H24' fill='none' stroke='%23fff' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='44' cy='44' r='5' fill='%234aa3ff'/%3E%3C/svg%3E">
+<style>*{box-sizing:border-box}html,body{margin:0;height:100%}body{font:14px/1.5 "Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,Arial,sans-serif;display:grid;place-items:center;padding:20px;background:radial-gradient(1200px 600px at 20% 10%,#1d4475,#081a33);color:#18212f}
+form{background:#fff;border-radius:18px;box-shadow:0 24px 48px rgba(8,26,51,.3);padding:32px;width:min(400px,100%);text-align:center;animation:p .3s cubic-bezier(.2,.8,.2,1)}
+.l{width:54px;height:54px;border-radius:14px;margin:0 auto 14px;background:linear-gradient(135deg,#0f6cbd,#1d4475);display:grid;place-items:center}
+.l svg{width:26px;height:26px;fill:none;stroke:#fff;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+h1{margin:0 0 4px;font-size:19px}p{margin:0;color:#6b7686;font-size:13px}
+input{width:100%;height:46px;border:1px solid #cdd3db;border-radius:10px;padding:0 14px;margin:20px 0 10px;font:inherit;font-size:16px;outline:none;text-align:center;letter-spacing:2px}
+input:focus{border-color:#0f6cbd;box-shadow:0 0 0 3px #cfe4fa}
+button{width:100%;height:44px;border:0;border-radius:10px;background:#0f6cbd;color:#fff;font-weight:600;font-size:15px;font-family:inherit;cursor:pointer}button:hover{background:#115ea3}button[disabled]{opacity:.6}
+#e{color:#c50f1f;font-size:13px;min-height:20px;margin-top:10px}.v{margin-top:14px;font-size:11.5px;color:#9aa4b2}
+[hidden]{display:none!important}@keyframes p{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}</style></head>
+<body><form id="g" hidden autocomplete="off"><div class="l"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div>
+<h1>App aide-mémoire</h1><p>Saisissez votre code d'accès</p>
+<input id="c" type="password" autocomplete="current-password" aria-label="Code d'accès"><button id="b">Ouvrir</button><div id="e"></div><div class="v">${esc(appName)} · v${esc(version)}</div></form>
+<script>${loader}${S}</body></html>`;
+}
+
 /* ---------- Génération ---------- */
 async function generate() {
   const btn = $('go'), status = $('go-status');
@@ -313,15 +392,28 @@ async function generate() {
   if (!/^\d+\.\d+\.\d+$/.test(v.version)) { status.textContent = 'Numéro de version au format 1.2.3 attendu.'; return; }
   if (!v.date) { status.textContent = 'Indiquez une date.'; return; }
   if (!v.release_notes.length) v.release_notes = ['Mise à jour ' + v.version];
+  const gateOn = $('g-on').checked, code = $('g-code').value, minutes = Math.max(0, parseInt($('g-min').value, 10) || 0);
+  if (gateOn) {
+    if (!window.crypto || !crypto.subtle) { status.textContent = 'Chiffrement indisponible dans ce navigateur.'; return; }
+    if (code.length < 8) { status.textContent = 'Le code d\'accès doit faire au moins 8 caractères.'; $('g-code').focus(); return; }
+    if (code !== $('g-code2').value) { status.textContent = 'Les deux codes ne correspondent pas.'; $('g-code2').focus(); return; }
+  }
   btn.disabled = true; btn.querySelector('svg').outerHTML = '<span class="spinner"></span>'; status.textContent = 'Protection en cours… (quelques secondes)';
   await new Promise(r => setTimeout(r, 50)); // laisse le navigateur afficher la progression
   const t0 = performance.now();
   try {
     const p = State.parts;
-    let js = p.js;  // le code est encapsulé (IIFE) avant obfuscation : tous les noms internes sont renommés
+    let js = p.js;  // encapsulé (IIFE) avant obfuscation : tous les noms internes sont renommés
     if ($('v-embed').checked) js = writeVersion(js, v);
     const obf = obfuscate('(function(){' + js + '\n})();', $('level').value).replace(/<\/script/gi, '<\\/script');
-    const out = compactHTML(p.head) + minifyCSS(p.css) + compactHTML(p.mid) + obf + compactHTML(p.tail);
+    const app = compactHTML(p.head) + minifyCSS(p.css) + compactHTML(p.mid) + obf + compactHTML(p.tail);
+    let out = app, gateOk = null;
+    if (gateOn) {
+      status.textContent = 'Chiffrement avec le code d\'accès…';
+      const P = await encryptPage(app, code, minutes);
+      out = gatePage(P, v.application, v.version);
+      try { gateOk = (await decryptPage(P, code)) === app; } catch { gateOk = false; }
+    }
 
     // Contrôles automatiques
     const checks = [];
@@ -329,14 +421,19 @@ async function generate() {
     if (syntaxOk) checks.push(['ok', 'JavaScript généré valide']);
     checks.push([/\n\s*\/\*/.test(obf) || /PLAN DU CODE|FICHIER SOURCE/.test(out) ? 'ko' : 'ok', 'Commentaires développeur supprimés']);
     checks.push([/function\s+boot|const\s+CONFIG\s*=/.test(out) ? 'ko' : 'ok', 'Noms internes du code masqués']);
-    checks.push([out.includes('id="app"') && out.includes('id="lock"') ? 'ok' : 'ko', 'Structure de la page conservée']);
+    checks.push([app.includes('id="app"') && app.includes('id="lock"') ? 'ok' : 'ko', 'Structure de la page conservée']);
+    if (gateOn) {
+      checks.push([gateOk ? 'ok' : 'ko', 'Code d\'accès vérifié : le bon code ouvre bien l\'app']);
+      checks.push([!out.includes('const CONFIG') && !out.includes('id="app"') ? 'ok' : 'ko', 'App entièrement chiffrée dans index.html (AES-256)']);
+      checks.push([!out.includes(code) ? 'ok' : 'ko', 'Le code d\'accès n\'apparaît pas dans le fichier']);
+    }
     if ($('v-embed').checked) checks.push([readVersion(writeVersion(p.js, v)) ? 'ok' : 'ko', 'Version ' + v.version + ' intégrée à l\'app']);
 
     State.out = out;
     State.versionJson = JSON.stringify(v, null, 2) + '\n';
     State.outSource = State.parts.head + p.css + p.mid + writeVersion(p.js, v) + p.tail;
     const failed = checks.some(c => c[0] === 'ko');
-    $('result').innerHTML = `<div class="info ${failed ? 'err' : 'ok'}">${failed ? '<b>Attention :</b> un contrôle a échoué, ne publiez pas ce fichier.' : '<b>index.html protégé prêt</b> — version ' + esc(v.version) + ' du ' + esc(v.date) + '.'}</div>
+    $('result').innerHTML = `<div class="info ${failed ? 'err' : 'ok'}">${failed ? '<b>Attention :</b> un contrôle a échoué, ne publiez pas ce fichier.' : '<b>index.html protégé prêt</b> — version ' + esc(v.version) + ' du ' + esc(v.date) + (gateOn ? ' · ouverture par code d\'accès' + (minutes ? ', redemandé après ' + minutes + ' min d\'inactivité' : ', demandé à chaque ouverture') : ' · sans code d\'accès') + '.'}</div>
       <div class="stats"><div class="stat"><b>${kb(State.source.length)}</b><span class="small muted">source lisible</span></div><div class="stat"><b>${kb(out.length)}</b><span class="small muted">index.html protégé</span></div><div class="stat"><b>${((performance.now() - t0) / 1000).toFixed(1)} s</b><span class="small muted">durée</span></div></div>
       <ul class="checks">${checks.map(([k, l]) => `<li class="${k === 'ko' ? 'ko' : ''}">${esc(l)}</li>`).join('')}</ul>`;
     $('dl-index').disabled = failed;
@@ -359,6 +456,9 @@ drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add(
 drop.addEventListener('dragleave', () => drop.classList.remove('over'));
 drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('over'); const f = e.dataTransfer.files[0]; if (f) { $('src-info').innerHTML = ''; loadFile(f); } });
 $('go').addEventListener('click', generate);
+const syncGate = () => document.querySelectorAll('.gate').forEach(el => { el.style.display = $('g-on').checked ? '' : 'none'; });
+$('g-on').addEventListener('change', syncGate); syncGate();
+$('g-show').addEventListener('change', () => { ['g-code', 'g-code2'].forEach(id => { $(id).type = $('g-show').checked ? 'text' : 'password'; }); });
 $('dl-index').addEventListener('click', () => State.out && download('index.html', State.out, 'text/html'));
 $('dl-version').addEventListener('click', () => State.versionJson && download('version.json', State.versionJson, 'application/json'));
 $('dl-source').addEventListener('click', () => State.outSource && download('App_aide_memoire.html', State.outSource, 'text/html'));
