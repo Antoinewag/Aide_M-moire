@@ -1,0 +1,9 @@
+{
+  "application": "Personal Knowledge & Executive Assistant",
+  "version": "1.0.1",
+  "date": "2026-11-20",
+  "release_notes": [
+    "Outil de protection séparé",
+    "Fichier source renommé App_aide_memoire.html"
+  ]
+}
