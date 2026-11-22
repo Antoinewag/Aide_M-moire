@@ -49,7 +49,7 @@ main{max-width:900px;margin:-14px auto 40px;padding:0 16px;display:flex;flex-dir
 .field{display:flex;flex-direction:column;gap:5px}
 .field.full{grid-column:1/-1}
 label{font-weight:600;font-size:12.5px;color:#465365}
-input[type=text],input[type=date],select,textarea{border:1px solid #cdd3db;border-radius:8px;padding:8px 10px;font:inherit;background:#fff;outline:none;width:100%}
+input[type=text],input[type=password],input[type=date],select,textarea{border:1px solid #cdd3db;border-radius:8px;padding:8px 10px;font:inherit;background:#fff;outline:none;width:100%}
 input:focus,select:focus,textarea:focus{border-color:var(--blue);box-shadow:0 0 0 3px var(--blue100)}
 textarea{min-height:110px;resize:vertical}
 .check{display:flex;gap:8px;align-items:center;font-weight:500;cursor:pointer}
@@ -71,6 +71,8 @@ ul.checks li.ko::before{content:"✖";color:var(--danger)}
 .stat b{display:block;font-size:18px;color:var(--navy)}
 .spinner{width:16px;height:16px;border:2px solid rgba(255,255,255,.4);border-top-color:#fff;border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
+.bad{border-color:var(--danger)!important;box-shadow:0 0 0 3px #f9d3d7!important}
+.hint{font-size:12px;margin-top:2px}.hint.ok{color:var(--ok)}.hint.ko{color:var(--danger)}
 .flow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:13px;margin-top:10px}
 .flow span{background:var(--blue50);border:1px solid var(--blue100);border-radius:20px;padding:3px 10px;font-weight:600;color:#115ea3}
 @media(max-width:640px){.grid,.stats{grid-template-columns:1fr}}
@@ -122,8 +124,8 @@ ul.checks li.ko::before{content:"✖";color:var(--danger)}
         </select></div>
       <div class="field full" style="margin-top:6px"><label class="check"><input type="checkbox" id="g-on" checked> Exiger un code d'accès pour ouvrir index.html</label>
         <small class="muted">L'app entière est chiffrée (AES-256) avec ce code : sans lui, index.html n'affiche qu'un écran de saisie et le code de l'app est illisible.</small></div>
-      <div class="field gate"><label for="g-code">Code d'accès (8 caractères minimum)</label><input type="password" id="g-code" autocomplete="new-password"></div>
-      <div class="field gate"><label for="g-code2">Confirmation</label><input type="password" id="g-code2" autocomplete="new-password"></div>
+      <div class="field gate"><label for="g-code">Code d'accès (8 caractères minimum)</label><input type="password" id="g-code" autocomplete="new-password"><span class="hint" id="h-code"></span></div>
+      <div class="field gate"><label for="g-code2">Confirmation</label><input type="password" id="g-code2" autocomplete="new-password"><span class="hint" id="h-code2"></span></div>
       <div class="field gate"><label for="g-min">Redemander le code après (minutes d'inactivité)</label><input type="text" id="g-min" value="60" inputmode="numeric"><small class="muted">0 = à chaque ouverture ou rechargement de la page.</small></div>
       <div class="field gate"><label class="check" style="margin-top:24px"><input type="checkbox" id="g-show"> Afficher le code</label></div>
       <div class="field full gate"><div class="info warn" style="margin:0">Le code n'est enregistré nulle part. En cas d'oubli : regénérez index.html ici avec un nouveau code — vos données dans l'app ne sont pas perdues.</div></div>
@@ -132,6 +134,7 @@ ul.checks li.ko::before{content:"✖";color:var(--danger)}
       <button class="btn primary" id="go"><svg viewBox="0 0 24 24" class="i"><path d="M12 3l8 3v6c0 5-3.5 8.2-8 9-4.5-.8-8-4-8-9V6z"/></svg><span>Protéger la page</span></button>
       <span class="small muted" id="go-status"></span>
     </div>
+    <div id="go-msg"></div>
   </div>
 
   <!-- ÉTAPE 4 : résultat -->
@@ -353,7 +356,9 @@ function watch(){if(!(P.m>0))return;var last=Date.now(),saved=0;
 function act(){last=Date.now();if(last-saved>30000){saved=last;try{var o=JSON.parse(sessionStorage.getItem(K));if(o){o.t=last;sessionStorage.setItem(K,JSON.stringify(o))}}catch(e){}}}
 ['mousemove','keydown','click','touchstart','scroll'].forEach(function(ev){window.addEventListener(ev,act,{passive:true,capture:true})});
 setInterval(function(){if(Date.now()-last>P.m*60000){forget();location.reload()}},15000)}
-function launch(html,raw){keep(raw);document.open();document.write(html);document.close();watch()}
+function launch(html,raw){keep(raw);var lastErr='';window.addEventListener('error',function(ev){lastErr=ev.message||lastErr});
+document.open();document.write(html);document.close();watch();
+setTimeout(function(){if(!document.getElementById('app')&&!document.getElementById('lock')||(document.getElementById('app')&&document.getElementById('app').hidden&&document.getElementById('lock')&&document.getElementById('lock').hidden)){forget();document.body.innerHTML='<div style="font:15px Segoe UI,system-ui,sans-serif;max-width:520px;margin:15vh auto;padding:24px;background:#fff;border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.15)"><h2 style="margin-top:0;color:#c50f1f">L\u2019app n\u2019a pas pu démarrer</h2><p>Le code est correct, mais une erreur a empêché l\u2019affichage. Essayez de recharger la page (Ctrl+F5). Si le problème persiste, mettez à jour Chrome ou Edge.</p><p style="color:#6b7686;font-size:13px">Détail : '+(lastErr||'inconnu').replace(/[<>&]/g,'')+'</p><button onclick="location.reload()" style="padding:10px 18px;border:0;border-radius:8px;background:#0f6cbd;color:#fff;font-weight:600;cursor:pointer">Recharger</button></div>'}},6000)}
 function show(){$('g').hidden=false;$('c').focus()}
 function submit(e){e.preventDefault();var c=$('c').value,b=$('b'),er=$('e');if(!c)return;b.disabled=true;er.textContent='Vérification…';var raw;
 derive(c).then(function(r){raw=r;return decrypt(r)}).then(function(html){launch(html,raw)}).catch(function(){fails++;er.textContent='Code incorrect.';$('c').value='';setTimeout(function(){b.disabled=false;$('c').focus()},Math.min(30000,500*Math.pow(2,fails-1)))})}
@@ -381,22 +386,31 @@ button{width:100%;height:44px;border:0;border-radius:10px;background:#0f6cbd;col
 }
 
 /* ---------- Génération ---------- */
+/** Affiche une erreur bien visible (encadré rouge + champ surligné) */
+function fail(msg, fieldId) {
+  $('go-msg').innerHTML = `<div class="info err"><b>Protection non lancée :</b> ${msg}</div>`;
+  $('go-status').textContent = '';
+  if (fieldId) { const f = $(fieldId); f.classList.add('bad'); f.focus(); f.addEventListener('input', () => f.classList.remove('bad'), { once: true }); }
+  $('go-msg').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
 async function generate() {
   const btn = $('go'), status = $('go-status');
+  $('go-msg').innerHTML = '';
   const v = {
     application: $('v-app').value.trim() || 'Personal Knowledge & Executive Assistant',
     version: $('v-version').value.trim(),
     date: $('v-date').value,
     release_notes: $('v-notes').value.split('\n').map(x => x.trim()).filter(Boolean)
   };
-  if (!/^\d+\.\d+\.\d+$/.test(v.version)) { status.textContent = 'Numéro de version au format 1.2.3 attendu.'; return; }
-  if (!v.date) { status.textContent = 'Indiquez une date.'; return; }
+  if (!State.parts) return fail('choisissez d\'abord le fichier App_aide_memoire.html (étape 1).');
+  if (!/^\d+\.\d+\.\d+$/.test(v.version)) return fail('le numéro de version doit être au format 1.2.3 (ex. 1.1.0).', 'v-version');
+  if (!v.date) return fail('indiquez une date de version.', 'v-date');
   if (!v.release_notes.length) v.release_notes = ['Mise à jour ' + v.version];
   const gateOn = $('g-on').checked, code = $('g-code').value, minutes = Math.max(0, parseInt($('g-min').value, 10) || 0);
   if (gateOn) {
-    if (!window.crypto || !crypto.subtle) { status.textContent = 'Chiffrement indisponible dans ce navigateur.'; return; }
-    if (code.length < 8) { status.textContent = 'Le code d\'accès doit faire au moins 8 caractères.'; $('g-code').focus(); return; }
-    if (code !== $('g-code2').value) { status.textContent = 'Les deux codes ne correspondent pas.'; $('g-code2').focus(); return; }
+    if (!window.crypto || !crypto.subtle) return fail('le chiffrement n\'est pas disponible dans ce navigateur. Utilisez Chrome ou Edge à jour.');
+    if (code.length < 8) return fail(`le code d'accès fait ${code.length} caractère(s) ; il en faut <b>au moins 8</b>. index.html étant public sur GitHub, un code court (ex. 4 chiffres) se devine en quelques minutes par un ordinateur. Exemple de code solide et facile à retenir : <b>Agenda-Bleu-2026</b>.`, 'g-code');
+    if (code !== $('g-code2').value) return fail('les deux codes saisis ne sont pas identiques.', 'g-code2');
   }
   btn.disabled = true; btn.querySelector('svg').outerHTML = '<span class="spinner"></span>'; status.textContent = 'Protection en cours… (quelques secondes)';
   await new Promise(r => setTimeout(r, 50)); // laisse le navigateur afficher la progression
@@ -441,7 +455,7 @@ async function generate() {
     $('step4').scrollIntoView({ behavior: 'smooth', block: 'start' });
     status.textContent = '';
   } catch (e) {
-    console.error(e); status.textContent = 'Erreur : ' + e.message;
+    console.error(e); fail('erreur inattendue : ' + esc(e.message));
   } finally {
     btn.disabled = false; const sp = btn.querySelector('.spinner'); if (sp) sp.outerHTML = '<svg viewBox="0 0 24 24" class="i"><path d="M12 3l8 3v6c0 5-3.5 8.2-8 9-4.5-.8-8-4-8-9V6z"/></svg>';
   }
@@ -458,6 +472,12 @@ drop.addEventListener('drop', e => { e.preventDefault(); drop.classList.remove('
 $('go').addEventListener('click', generate);
 const syncGate = () => document.querySelectorAll('.gate').forEach(el => { el.style.display = $('g-on').checked ? '' : 'none'; });
 $('g-on').addEventListener('change', syncGate); syncGate();
+const liveCode = () => {
+  const c = $('g-code').value, c2 = $('g-code2').value, h = $('h-code'), h2 = $('h-code2');
+  h.className = 'hint ' + (c.length >= 8 ? 'ok' : 'ko'); h.textContent = !c ? '' : c.length >= 8 ? '✔ Longueur suffisante' : `Encore ${8 - c.length} caractère(s)`;
+  h2.className = 'hint ' + (c2 && c2 === c ? 'ok' : 'ko'); h2.textContent = !c2 ? '' : c2 === c ? '✔ Les codes correspondent' : 'Les codes ne correspondent pas';
+};
+$('g-code').addEventListener('input', liveCode); $('g-code2').addEventListener('input', liveCode);
 $('g-show').addEventListener('change', () => { ['g-code', 'g-code2'].forEach(id => { $(id).type = $('g-show').checked ? 'text' : 'password'; }); });
 $('dl-index').addEventListener('click', () => State.out && download('index.html', State.out, 'text/html'));
 $('dl-version').addEventListener('click', () => State.versionJson && download('version.json', State.versionJson, 'application/json'));
