@@ -128,6 +128,7 @@ ul.checks li.ko::before{content:"✖";color:var(--danger)}
       <div class="field gate"><label for="g-code2">Confirmation</label><input type="password" id="g-code2" autocomplete="new-password"><span class="hint" id="h-code2"></span></div>
       <div class="field gate"><label for="g-min">Redemander le code après (minutes d'inactivité)</label><input type="text" id="g-min" value="60" inputmode="numeric"><small class="muted">0 = à chaque ouverture ou rechargement de la page.</small></div>
       <div class="field gate"><label class="check" style="margin-top:24px"><input type="checkbox" id="g-show"> Afficher le code</label></div>
+      <div class="field gate"><label for="g-rem">Case « Ne plus demander le code pendant… » (minutes)</label><input type="text" id="g-rem" value="60" inputmode="numeric"><small class="muted">Ajoute sur l'écran du code une case à cocher : le code n'est plus demandé sur cet appareil pendant cette durée, même après fermeture du navigateur. 0 = pas de case.</small></div>
       <div class="field full gate"><div class="info warn" style="margin:0">Le code n'est enregistré nulle part. En cas d'oubli : regénérez index.html ici avec un nouveau code — vos données dans l'app ne sont pas perdues.</div></div>
     </div>
     <div class="row" style="margin-top:14px">
@@ -297,6 +298,31 @@ function compactHTML(html) {
   return html.replace(/<!--[\s\S]*?-->/g, '').replace(/>\s+</g, '> <').replace(/\s{2,}/g, ' ').replace(/^\s+/, '');
 }
 
+/* ---------- Protection de la page entière ----------
+   Chaque bloc <script> en ligne est obfusqué séparément (le dernier = code
+   principal, encapsulé), chaque <style> minifié ; seul le HTML autour est
+   compacté. Ainsi un module ajouté plus tard (ex. Tonio — liens profonds)
+   n'est jamais aplati sur une ligne, ce qui casserait ses commentaires //. */
+function protectHTML(html, mainJs, level) {
+  // Commentaires HTML de tête (avant <html>) retirés d'abord : ils peuvent citer « <script> »
+  const h0 = html.search(/<html[\s>]/i);
+  if (h0 > 0) html = html.slice(0, h0).replace(/<!--[\s\S]*?-->/g, '') + html.slice(h0);
+  const re = /<(script|style)(\s[^>]*)?>([\s\S]*?)<\/\1>/gi, blocks = [];
+  let m; while ((m = re.exec(html))) blocks.push({ i: m.index, end: re.lastIndex, tag: m[1].toLowerCase(), attrs: m[2] || '', body: m[3] });
+  const mainIdx = blocks.map(b => b.tag).lastIndexOf('script');
+  let out = '', last = 0; const codes = [];
+  blocks.forEach((b, k) => {
+    out += compactHTML(html.slice(last, b.i)); last = b.end;
+    if (b.tag === 'style') { out += '<style' + b.attrs + '>' + minifyCSS(b.body) + '<\/style>'; return; }
+    if (/\bsrc\s*=/i.test(b.attrs) || !b.body.trim()) { out += html.slice(b.i, b.end); return; }
+    const src = k === mainIdx ? '(function(){' + mainJs + '\n})();' : b.body;
+    const code = obfuscate(src, level).replace(/<\/script/gi, '<\\/script');
+    codes.push(code);
+    out += '<script' + b.attrs + '>' + code + '<\/script>';
+  });
+  return { out: out + compactHTML(html.slice(last)), codes };
+}
+
 /* ---------- Obfuscation JavaScript ---------- */
 function obfuscate(js, level) {
   const opts = {
@@ -329,23 +355,27 @@ async function deriveRaw(code, salt, iter) {
   const k = await crypto.subtle.importKey('raw', new TextEncoder().encode(code), 'PBKDF2', false, ['deriveBits']);
   return new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: iter, hash: 'SHA-256' }, k, 256));
 }
-async function encryptPage(html, code, minutes) {
+async function encryptPage(html, code, minutes, remember = 0) {
   const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
   const z = await gzip(html), plain = z || new TextEncoder().encode(html);
   const key = await crypto.subtle.importKey('raw', await deriveRaw(code, salt, GATE_ITER), 'AES-GCM', false, ['encrypt']);
   const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain));
-  return { id: b64(crypto.getRandomValues(new Uint8Array(6))).replace(/[^a-z0-9]/gi, ''), n: GATE_ITER, s: b64(salt), v: b64(iv), d: b64(data), z: z ? 1 : 0, m: minutes };
+  return { id: b64(crypto.getRandomValues(new Uint8Array(6))).replace(/[^a-z0-9]/gi, ''), n: GATE_ITER, s: b64(salt), v: b64(iv), d: b64(data), z: z ? 1 : 0, m: minutes, r: remember };
 }
 async function decryptPage(P, code) {
   const key = await crypto.subtle.importKey('raw', await deriveRaw(code, unb64(P.s), P.n), 'AES-GCM', false, ['decrypt']);
   const buf = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(P.v) }, key, unb64(P.d)));
   return P.z ? gunzip(buf) : new TextDecoder().decode(buf);
 }
+const dureeTxt = m => m % 60 === 0 ? (m / 60) + ' h' : m + ' min';
 /** Page d'accès autonome (aucune dépendance, aucun secret en clair) */
 function gatePage(P, appName, version) {
   const S = '<' + '/script>';
   const loader = `(function(){'use strict';
-var P=${JSON.stringify(P)},K='aam.gate.'+P.id,fails=0,$=function(i){return document.getElementById(i)};
+var P=${JSON.stringify(P)},K='aam.gate.'+P.id,KR='aam.remember.'+P.id,fails=0,$=function(i){return document.getElementById(i)};
+function remGet(){try{var o=JSON.parse(localStorage.getItem(KR));if(o&&o.exp>Date.now())return o;localStorage.removeItem(KR)}catch(e){}return null}
+function remSet(raw){try{localStorage.setItem(KR,JSON.stringify({k:s64(raw),exp:Date.now()+P.r*60000}))}catch(e){}}
+try{Object.keys(localStorage).forEach(function(k){if(k.indexOf('aam.remember.')===0&&k!==KR)localStorage.removeItem(k)})}catch(e){}
 function u8(s){var b=atob(s),u=new Uint8Array(b.length);for(var i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u}
 function s64(u){var s='';for(var i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);return btoa(s)}
 function derive(c){return crypto.subtle.importKey('raw',new TextEncoder().encode(c),'PBKDF2',false,['deriveBits']).then(function(k){return crypto.subtle.deriveBits({name:'PBKDF2',salt:u8(P.s),iterations:P.n,hash:'SHA-256'},k,256)}).then(function(b){return new Uint8Array(b)})}
@@ -355,17 +385,19 @@ function keep(raw){if(P.m>0){try{sessionStorage.setItem(K,JSON.stringify({k:s64(
 function watch(){if(!(P.m>0))return;var last=Date.now(),saved=0;
 function act(){last=Date.now();if(last-saved>30000){saved=last;try{var o=JSON.parse(sessionStorage.getItem(K));if(o){o.t=last;sessionStorage.setItem(K,JSON.stringify(o))}}catch(e){}}}
 ['mousemove','keydown','click','touchstart','scroll'].forEach(function(ev){window.addEventListener(ev,act,{passive:true,capture:true})});
-setInterval(function(){if(Date.now()-last>P.m*60000){forget();location.reload()}},15000)}
+setInterval(function(){if(Date.now()-last>P.m*60000&&!remGet()){forget();location.reload()}},15000)}
 function launch(html,raw){keep(raw);var lastErr='';window.addEventListener('error',function(ev){lastErr=ev.message||lastErr});
 document.open();document.write(html);document.close();watch();
 setTimeout(function(){if(!document.getElementById('app')&&!document.getElementById('lock')||(document.getElementById('app')&&document.getElementById('app').hidden&&document.getElementById('lock')&&document.getElementById('lock').hidden)){forget();document.body.innerHTML='<div style="font:15px Segoe UI,system-ui,sans-serif;max-width:520px;margin:15vh auto;padding:24px;background:#fff;border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.15)"><h2 style="margin-top:0;color:#c50f1f">L\u2019app n\u2019a pas pu démarrer</h2><p>Le code est correct, mais une erreur a empêché l\u2019affichage. Essayez de recharger la page (Ctrl+F5). Si le problème persiste, mettez à jour Chrome ou Edge.</p><p style="color:#6b7686;font-size:13px">Détail : '+(lastErr||'inconnu').replace(/[<>&]/g,'')+'</p><button onclick="location.reload()" style="padding:10px 18px;border:0;border-radius:8px;background:#0f6cbd;color:#fff;font-weight:600;cursor:pointer">Recharger</button></div>'}},6000)}
 function show(){$('g').hidden=false;$('c').focus()}
 function submit(e){e.preventDefault();var c=$('c').value,b=$('b'),er=$('e');if(!c)return;b.disabled=true;er.textContent='Vérification…';var raw;
-derive(c).then(function(r){raw=r;return decrypt(r)}).then(function(html){launch(html,raw)}).catch(function(){fails++;er.textContent='Code incorrect.';$('c').value='';setTimeout(function(){b.disabled=false;$('c').focus()},Math.min(30000,500*Math.pow(2,fails-1)))})}
+derive(c).then(function(r){raw=r;return decrypt(r)}).then(function(html){if($('r')&&$('r').checked)remSet(raw);launch(html,raw)}).catch(function(){fails++;er.textContent='Code incorrect.';$('c').value='';setTimeout(function(){b.disabled=false;$('c').focus()},Math.min(30000,500*Math.pow(2,fails-1)))})}
 if(!window.crypto||!crypto.subtle){$('e').textContent='Navigateur non compatible (ouvrez la page en https).';$('g').hidden=false;return}
 $('g').addEventListener('submit',submit);
 var o=null;try{o=JSON.parse(sessionStorage.getItem(K))}catch(e){}
-if(o&&P.m>0&&Date.now()-o.t<P.m*60000){var raw=u8(o.k);decrypt(raw).then(function(h){launch(h,raw)}).catch(function(){forget();show()})}else{forget();show()}
+var rm=remGet();
+if(rm){var rr=u8(rm.k);decrypt(rr).then(function(h){launch(h,rr)}).catch(function(){try{localStorage.removeItem(KR)}catch(e){}show()})}
+else if(o&&P.m>0&&Date.now()-o.t<P.m*60000){var raw=u8(o.k);decrypt(raw).then(function(h){launch(h,raw)}).catch(function(){forget();show()})}else{forget();show()}
 })();`;
   return `<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow"><meta name="theme-color" content="#0b2545">
 <title>${esc(appName)}</title><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b2545'/%3E%3Cpath d='M18 44V20h14a8 8 0 0 1 0 16H24' fill='none' stroke='%23fff' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='44' cy='44' r='5' fill='%234aa3ff'/%3E%3C/svg%3E">
@@ -377,11 +409,12 @@ h1{margin:0 0 4px;font-size:19px}p{margin:0;color:#6b7686;font-size:13px}
 input{width:100%;height:46px;border:1px solid #cdd3db;border-radius:10px;padding:0 14px;margin:20px 0 10px;font:inherit;font-size:16px;outline:none;text-align:center;letter-spacing:2px}
 input:focus{border-color:#0f6cbd;box-shadow:0 0 0 3px #cfe4fa}
 button{width:100%;height:44px;border:0;border-radius:10px;background:#0f6cbd;color:#fff;font-weight:600;font-size:15px;font-family:inherit;cursor:pointer}button:hover{background:#115ea3}button[disabled]{opacity:.6}
+label.r{display:flex;gap:8px;align-items:center;justify-content:flex-start;text-align:left;margin:0 0 14px;font-size:13px;color:#465365;cursor:pointer}label.r input{width:16px;height:16px;margin:0;accent-color:#0f6cbd;letter-spacing:0}
 #e{color:#c50f1f;font-size:13px;min-height:20px;margin-top:10px}.v{margin-top:14px;font-size:11.5px;color:#9aa4b2}
 [hidden]{display:none!important}@keyframes p{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}</style></head>
 <body><form id="g" hidden autocomplete="off"><div class="l"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></div>
 <h1>App aide-mémoire</h1><p>Saisissez votre code d'accès</p>
-<input id="c" type="password" autocomplete="current-password" aria-label="Code d'accès"><button id="b">Ouvrir</button><div id="e"></div><div class="v">${esc(appName)} · v${esc(version)}</div></form>
+<input id="c" type="password" autocomplete="current-password" aria-label="Code d'accès">${P.r > 0 ? `<label class="r"><input type="checkbox" id="r"> Ne plus demander le code pendant ${esc(dureeTxt(P.r))}</label>` : ''}<button id="b">Ouvrir</button><div id="e"></div><div class="v">${esc(appName)} · v${esc(version)}</div></form>
 <script>${loader}${S}</body></html>`;
 }
 
@@ -407,6 +440,7 @@ async function generate() {
   if (!v.date) return fail('indiquez une date de version.', 'v-date');
   if (!v.release_notes.length) v.release_notes = ['Mise à jour ' + v.version];
   const gateOn = $('g-on').checked, code = $('g-code').value, minutes = Math.max(0, parseInt($('g-min').value, 10) || 0);
+  const remember = Math.max(0, Math.min(1440, parseInt($('g-rem').value, 10) || 0));
   if (gateOn) {
     if (!window.crypto || !crypto.subtle) return fail('le chiffrement n\'est pas disponible dans ce navigateur. Utilisez Chrome ou Edge à jour.');
     if (code.length < 8) return fail(`le code d'accès fait ${code.length} caractère(s) ; il en faut <b>au moins 8</b>. index.html étant public sur GitHub, un code court (ex. 4 chiffres) se devine en quelques minutes par un ordinateur. Exemple de code solide et facile à retenir : <b>Agenda-Bleu-2026</b>.`, 'g-code');
@@ -419,20 +453,20 @@ async function generate() {
     const p = State.parts;
     let js = p.js;  // encapsulé (IIFE) avant obfuscation : tous les noms internes sont renommés
     if ($('v-embed').checked) js = writeVersion(js, v);
-    const obf = obfuscate('(function(){' + js + '\n})();', $('level').value).replace(/<\/script/gi, '<\\/script');
-    const app = compactHTML(p.head) + minifyCSS(p.css) + compactHTML(p.mid) + obf + compactHTML(p.tail);
+    const prot = protectHTML(State.source, js, $('level').value), app = prot.out, obf = prot.codes.join('\n');
     let out = app, gateOk = null;
     if (gateOn) {
       status.textContent = 'Chiffrement avec le code d\'accès…';
-      const P = await encryptPage(app, code, minutes);
+      const P = await encryptPage(app, code, minutes, remember);
       out = gatePage(P, v.application, v.version);
       try { gateOk = (await decryptPage(P, code)) === app; } catch { gateOk = false; }
     }
 
     // Contrôles automatiques
     const checks = [];
-    let syntaxOk = true; try { new Function(obf); } catch (e) { syntaxOk = false; checks.push(['ko', 'JavaScript généré invalide : ' + e.message]); }
-    if (syntaxOk) checks.push(['ok', 'JavaScript généré valide']);
+    let syntaxOk = true;
+    prot.codes.forEach((c, i) => { try { new Function(c); } catch (e) { syntaxOk = false; checks.push(['ko', `Bloc de code ${i + 1} invalide : ` + e.message]); } });
+    if (syntaxOk) checks.push(['ok', `JavaScript généré valide (${prot.codes.length} bloc${prot.codes.length > 1 ? 's' : ''} de code protégé${prot.codes.length > 1 ? 's' : ''})`]);
     checks.push([/\n\s*\/\*/.test(obf) || /PLAN DU CODE|FICHIER SOURCE/.test(out) ? 'ko' : 'ok', 'Commentaires développeur supprimés']);
     checks.push([/function\s+boot|const\s+CONFIG\s*=/.test(out) ? 'ko' : 'ok', 'Noms internes du code masqués']);
     checks.push([app.includes('id="app"') && app.includes('id="lock"') ? 'ok' : 'ko', 'Structure de la page conservée']);
@@ -447,7 +481,7 @@ async function generate() {
     State.versionJson = JSON.stringify(v, null, 2) + '\n';
     State.outSource = State.parts.head + p.css + p.mid + writeVersion(p.js, v) + p.tail;
     const failed = checks.some(c => c[0] === 'ko');
-    $('result').innerHTML = `<div class="info ${failed ? 'err' : 'ok'}">${failed ? '<b>Attention :</b> un contrôle a échoué, ne publiez pas ce fichier.' : '<b>index.html protégé prêt</b> — version ' + esc(v.version) + ' du ' + esc(v.date) + (gateOn ? ' · ouverture par code d\'accès' + (minutes ? ', redemandé après ' + minutes + ' min d\'inactivité' : ', demandé à chaque ouverture') : ' · sans code d\'accès') + '.'}</div>
+    $('result').innerHTML = `<div class="info ${failed ? 'err' : 'ok'}">${failed ? '<b>Attention :</b> un contrôle a échoué, ne publiez pas ce fichier.' : '<b>index.html protégé prêt</b> — version ' + esc(v.version) + ' du ' + esc(v.date) + (gateOn ? ' · ouverture par code d\'accès' + (minutes ? ', redemandé après ' + minutes + ' min d\'inactivité' : ', demandé à chaque ouverture') + (remember ? ', case « ne plus demander pendant ' + dureeTxt(remember) + ' »' : '') : ' · sans code d\'accès') + '.'}</div>
       <div class="stats"><div class="stat"><b>${kb(State.source.length)}</b><span class="small muted">source lisible</span></div><div class="stat"><b>${kb(out.length)}</b><span class="small muted">index.html protégé</span></div><div class="stat"><b>${((performance.now() - t0) / 1000).toFixed(1)} s</b><span class="small muted">durée</span></div></div>
       <ul class="checks">${checks.map(([k, l]) => `<li class="${k === 'ko' ? 'ko' : ''}">${esc(l)}</li>`).join('')}</ul>`;
     $('dl-index').disabled = failed;
